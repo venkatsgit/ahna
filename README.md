@@ -4,6 +4,51 @@
 
 ---
 
+## Table of Contents
+
+1. [Executive Summary](#executive-summary)
+2. [Current System Architecture](#current-system-architecture)
+   - [Current System Components](#current-system-components)
+3. [The Fundamental Problem](#the-fundamental-problem)
+   - [Why Current Approach Fails](#why-current-approach-fails)
+   - [Real-World Example: Chiller Failure](#real-world-example-chiller-failure)
+4. [Why LSTM Fails to Predict Failures in Practice](#why-lstm-fails-to-predict-failures-in-practice)
+5. [Would Replacing LSTM with TimeGPT Help?](#would-replacing-lstm-with-timegpt-help)
+6. [Proposed Solution Architecture](#proposed-solution-architecture)
+   - [Two-Stage Approach](#two-stage-approach)
+7. [Historical Failure Database](#historical-failure-database)
+   - [Incident-Based Approach](#incident-based-approach)
+   - [Step 1: Create Incident Table](#step-1-create-incident-table)
+8. [Correlation Analysis](#correlation-analysis)
+   - [What is Sensor Correlation?](#what-is-sensor-correlation)
+   - [Correlation Algorithm Intuition](#correlation-algorithm-intuition)
+   - [Correlation Analysis Process](#correlation-analysis-process)
+   - [Correlation Database Structure](#correlation-database-structure)
+9. [Change Point Detection on Historical Data](#change-point-detection-on-historical-data)
+   - [What is Change Point Detection?](#what-is-change-point-detection)
+   - [Change Point Detection Algorithm](#change-point-detection-algorithm)
+   - [Change Point Detection Process](#change-point-detection-process)
+   - [Example Change Point Detection](#example-change-point-detection)
+10. [Change Point Detection: Algorithm & Implementation](#change-point-detection-algorithm--implementation)
+    - [Algorithm Requirements](#algorithm-requirements)
+    - [Historical Data Enrichment](#historical-data-enrichment)
+    - [Real-Time Change Point Detection](#real-time-change-point-detection)
+    - [Minimum Data Requirements](#minimum-data-requirements)
+11. [Detailed Change Point Detection Example](#detailed-change-point-detection-example)
+    - [How to Mark "When Behavior Changed"](#how-to-mark-when-behavior-changed)
+12. [Historical Failure Table & Failure Type Classification](#historical-failure-table--failure-type-classification)
+    - [Historical Failure Table Structure](#historical-failure-table-structure)
+    - [How Trends and Correlations Are Calculated](#how-trends-and-correlations-are-calculated)
+    - [Example Historical Failure Records](#example-historical-failure-records)
+    - [Integrated Model Training](#integrated-model-training)
+13. [Detailed Survival Analysis Training & Inference](#detailed-survival-analysis-training--inference)
+    - [Training the Survival Analysis Model](#training-the-survival-analysis-model)
+    - [Inference: Predicting Time to Failure](#inference-predicting-time-to-failure)
+14. [Why This Approach Works Better](#why-this-approach-works-better)
+15. [Conclusion](#conclusion)
+
+---
+
 ## Executive Summary
 
 **Current Challenge**: Our predictive maintenance system uses time series forecasting (LSTM) + pattern matching to predict equipment failures. However, this approach has fundamental limitations that prevent accurate failure prediction.
@@ -428,6 +473,109 @@ Time to Failure: 51.5 hours
 
 ---
 
+## Change Point Detection: Algorithm & Implementation
+
+### Algorithm Requirements
+
+**Yes, Change Point Detection is an algorithm** that needs to run in two scenarios:
+
+#### 1. **Historical Data Enrichment** (One-time process)
+**Purpose**: Enrich the incident table with change point information for each historical failure
+
+**Process**:
+```
+For each incident in the incident table:
+1. Get sensor data for 7 days before failure
+2. Apply change point detection to each sensor
+3. Find the earliest change point across all sensors
+4. Store change_point timestamp in historical_failures table
+5. Calculate trend rates and correlations from change_point to failure
+```
+
+**Algorithm Used**: PELT (Pruned Exact Linear Time) from ruptures library
+```python
+# Example for each sensor
+model = ruptures.Pelt(model="rbf", min_size=288)  # 4 hours minimum
+result = model.fit_predict(sensor_values)
+change_point = timestamps[result[1]]  # First change point
+```
+
+#### 2. **Real-Time Change Point Detection** (Every 1 hour)
+**Purpose**: Detect change points in incoming sensor data as early as possible
+
+**Process**:
+```
+Every hour:
+1. Get last 24 hours of sensor data (1440 data points)
+2. Apply change point detection to each sensor
+3. If change point detected:
+   - Extract features (trend rates, correlations)
+   - Run survival analysis for time-to-failure
+   - Run random forest for failure type
+   - Generate alert
+4. If no change point: continue monitoring
+```
+
+### Minimum Data Requirements
+
+**For Historical Enrichment**:
+- **Minimum**: 7 days of data before each failure (10,080 data points)
+- **Optimal**: 14 days of data before each failure (20,160 data points)
+- **Reason**: Need enough baseline data to establish "normal" behavior
+
+**For Real-Time Detection**:
+- **Minimum**: 4 hours of data (240 data points) 
+- **Optimal**: 24 hours of data (1,440 data points)
+- **Reason**: Need sufficient history to detect statistical changes
+
+**Why Smaller Datasets Work**:
+- **Statistical Power**: 240+ data points provide sufficient statistical power
+- **Sliding Window**: Algorithm uses sliding windows (4-hour chunks) within the data
+- **Multiple Sensors**: Correlation across sensors increases detection confidence
+- **Early Detection**: Goal is to detect changes as early as possible, not wait for full failure
+
+### Real-Time Implementation Strategy
+
+**Hourly Processing**:
+```
+Time: Every hour (e.g., 14:00, 15:00, 16:00...)
+Data Window: Last 24 hours (1440 data points)
+Processing: 
+1. Change point detection on each sensor
+2. If change detected → extract features → predict failure
+3. If no change → continue monitoring
+```
+
+**Early Detection Trade-offs**:
+- **Smaller window (4 hours)**: Faster detection, more false positives
+- **Larger window (24 hours)**: More reliable detection, slower response
+- **Recommended**: Start with 24-hour window, optimize based on results
+
+### Change Point Detection Algorithm Details
+
+**Statistical Method**: PELT (Pruned Exact Linear Time)
+- **Advantage**: Finds exact change points, not approximate
+- **Speed**: O(n log n) complexity, suitable for real-time
+- **Sensitivity**: Configurable via penalty parameter
+
+**Multi-Sensor Approach**:
+```
+For each sensor (Temperature, Vibration, Power, etc.):
+1. Apply PELT algorithm
+2. Get change point timestamp
+3. Calculate statistical significance (p-value)
+
+Final change point = earliest significant change point across all sensors
+```
+
+**Validation Criteria**:
+- **Statistical significance**: p-value < 0.01
+- **Multi-sensor confirmation**: At least 2 sensors show changes
+- **Correlation validation**: Changes are correlated across sensors
+- **Trend consistency**: Changes show consistent failure progression
+
+---
+
 ## Detailed Change Point Detection Example
 
 ### How to Mark "When Behavior Changed"
@@ -837,76 +985,6 @@ ALERT: CH_006 - Bearing Failure Predicted
 - **Robust predictions**: Less sensitive to individual sensor noise
 
 ---
-
-## Historical Failure Table & Failure Type Classification
-
-### Historical Failure Table Structure
-
-**Key Fields:**
-```sql
-CREATE TABLE historical_failures (
-    id SERIAL PRIMARY KEY,
-    asset_id VARCHAR(50),
-    incident_type VARCHAR(100),        -- Bearing, Motor, Valve, etc.
-    change_point TIMESTAMP,
-    hours_to_failure FLOAT,
-    
-    -- Sensor Trend Features (calculated from change_point to failure)
-    temperature_trend_rate FLOAT,      -- °C/hour
-    vibration_trend_rate FLOAT,        -- mm/s/hour
-    power_trend_rate FLOAT,            -- kW/hour
-    
-    -- Correlations (calculated from change_point to failure)
-    temp_vib_correlation FLOAT,        -- Temperature vs Vibration
-    temp_power_correlation FLOAT,      -- Temperature vs Power
-    
-    -- Failure Classification
-    failure_pattern_signature TEXT,    -- Pattern identifier
-    created_at TIMESTAMP DEFAULT NOW()
-);
-```
-
-### Failure Type Classification: Integrated Approach (Recommended)
-
-**How It Works:**
-The failure type is predicted using the same features as time-to-failure prediction.
-
-```python
-# Train integrated model
-def train_integrated_model(historical_failures):
-    # Time-to-failure model
-    time_model = CoxPHFitter()
-    time_model.fit(historical_failures, duration_col='hours_to_failure', 
-                  covariates=['temp_trend_rate', 'vib_trend_rate', 'power_trend_rate'])
-    
-    # Failure type model (same features)
-    type_model = RandomForestClassifier()
-    type_model.fit(historical_failures[['temp_trend_rate', 'vib_trend_rate', 'power_trend_rate']], 
-                  historical_failures['incident_type'])
-    
-    return time_model, type_model
-
-# Prediction
-def predict_failure(current_features):
-    time_to_failure = time_model.predict_survival_function(current_features)
-    failure_type = type_model.predict_proba(current_features)
-    
-    return time_to_failure, failure_type
-```
-
-**Example Output:**
-```
-ALERT: CH_006 - Bearing Failure Predicted
-- Time to Failure: 42 hours (36-48 hours confidence)
-- Failure Type: Bearing Failure (85% confidence)
-- Recommended Action: Schedule bearing replacement within 24 hours
-```
-
-**Why Integrated Approach is Better:**
-- **Consistency**: Same features for time and type prediction
-- **Efficiency**: Single model training, no separate pattern matching
-- **Accuracy**: Leverages all available sensor information
-
 
 ## Conclusion
 
