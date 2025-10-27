@@ -42,7 +42,7 @@ Firewall (Block ALL Inbound)
 Data Collector (No inbound access)
     ├─ IoT Edge Runtime
     ├─ IoT Modules
-    └─ Outbound → IoT Hub (only connection direction)
+    └─ Outbound → IoT Hub + Container Registry (only connection direction)
 ```
 
 ### Azure IoT Edge Communication Model
